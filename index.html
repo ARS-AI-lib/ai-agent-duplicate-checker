@@ -371,11 +371,11 @@
 <script>
 // ── Config ──────────────────────────────────────────
 const SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbwhj6QKTkjcFzKU71xoalyloSyWufbkQllluvT25QHbQ5xCe1oYXlKBS9vIrmRqoEc/exec';
-const REGISTER_URL = 'https://forms.office.com/r/XsCqBCC5ng';
+const REGISTER_URL = 'https://forms.office.com/Pages/ResponsePage.aspx?id=wGfYuEm5XEWV3c7lMk7YFRpFIXQctIVArvLw47KbPYRUOUpLT1Q5MzFDTTVVRjlOU0lXN0hLUEhJUC4u';
 const WEIGHTS = { 'Agent Name':0.25,'Description':0.25,'Core Ability':0.15,'Input':0.15,'Output':0.15,'Business Value':0.05 };
 
 // ── State ────────────────────────────────────────────
-let library=[], newAgent={}, matches=[], idx=0;
+let library=[], newAgent={}, matches=[], idx=0, sdlcRows=[], connSuggestions=[];
 
 // ── Bootstrap ────────────────────────────────────────
 window.onload = () => fetchFromScript();
@@ -394,6 +394,7 @@ function fetchFromScript() {
     window[cbName] = (data) => {
         clearTimeout(timer); script.remove(); delete window[cbName];
         library = data.data || [];
+        sdlcRows = Array.isArray(data.sdlc) ? data.sdlc : [];
         library.length ? onLoaded('Google Sheets') : (() => { hide('loadSpinner'); show('loadError'); document.getElementById('errMsg').textContent='No data returned from script.'; })();
     };
     script.src = `${SCRIPT_URL}?callback=${cbName}`;
@@ -457,13 +458,168 @@ function onSDLC() {
     const sel = document.getElementById('f-proc');
     if (v && v !== 'non-SDLC') {
         grp.style.display='flex'; grp.style.flexDirection='column';
-        const procs = uniq(library.filter(r=>r['SDLC Stage']===v),'SDLC Process Mapping');
+        const procs = uniqMulti(library.filter(r=>r['SDLC Stage']===v),'SDLC Process Mapping');
         sel.innerHTML = '';
         procs.forEach(p=>{ const o=document.createElement('option'); o.value=o.textContent=p; sel.appendChild(o); });
     } else { grp.style.display='none'; }
 }
 
 // ── Check ─────────────────────────────────────────────
+/* ════════════════════════════════════════════════════════════════════
+ * AGENT INTEGRATION — "ต่อกับตัวนี้ได้" suggestions for a draft idea
+ * Same scoring logic validated in the Dashboard's Connections tab,
+ * adapted to score ONE draft entry against every existing library row.
+ * ════════════════════════════════════════════════════════════════════ */
+const CONN_THRESHOLD = 40, GENERIC_MIN_COUNT = 5;
+
+function intNorm(s){ return (s||'').toLowerCase().replace(/tbc/g,'').replace(/[.,;:()\/\-_]/g,' ').replace(/\s+/g,' ').trim(); }
+function intTokens(s){ return intNorm(s).split(' ').filter(w=>w.length>2); }
+function intDataJaccard(a,b,stopwords){
+    const ta=new Set(intTokens(a).filter(t=>!stopwords.has(t))), tb=new Set(intTokens(b).filter(t=>!stopwords.has(t)));
+    if(!ta.size||!tb.size) return 0;
+    let inter=0; ta.forEach(t=>{if(tb.has(t)) inter++;});
+    return inter/(ta.size+tb.size-inter);
+}
+function intJaccard(a,b){
+    const ta=new Set(intTokens(a)), tb=new Set(intTokens(b));
+    if(!ta.size||!tb.size) return 0;
+    let inter=0; ta.forEach(t=>{if(tb.has(t)) inter++;});
+    return inter/(ta.size+tb.size-inter);
+}
+function intLev(a,b){
+    const m=a.length,n=b.length;
+    const dp=Array.from({length:m+1},(_,i)=>[i,...Array(n).fill(0)]);
+    for(let j=0;j<=n;j++) dp[0][j]=j;
+    for(let i=1;i<=m;i++) for(let j=1;j<=n;j++)
+        dp[i][j]=a[i-1]===b[j-1]?dp[i-1][j-1]:1+Math.min(dp[i-1][j],dp[i][j-1],dp[i-1][j-1]);
+    return dp[m][n];
+}
+function intLevSim(a,b){
+    const na=intNorm(a),nb=intNorm(b);
+    if(!na||!nb) return 0; if(na===nb) return 100;
+    const ml=Math.max(na.length,nb.length);
+    return Math.max(0,(1-intLev(na,nb)/ml)*100);
+}
+function intTextSim(a,b,stopwords){
+    const na=intNorm(a),nb=intNorm(b);
+    if(!na||!nb) return 0; if(na===nb) return 100;
+    return Math.max(intDataJaccard(a,b,stopwords)*100, intLevSim(a,b));
+}
+function intIsTBC(v){ return !intNorm(v); }
+function buildToolStopwords(rows){
+    const set=new Set();
+    rows.forEach(r=>intTokens(r['Tool']).forEach(t=>set.add(t)));
+    ['jira','gitlab','github','vercel','docker','confluence','sharepoint','slack','teams',
+     'qdrant','figma','supabase','kubernetes','prometheus','api','ide','git','sonarqube',
+     'robot','framework','claude','gemini','gpt','opus','sonnet','flash','mcp','antigravity']
+      .forEach(t=>set.add(t));
+    return set;
+}
+function buildGenericIndex(rows){
+    const freq={};
+    rows.forEach(r=>{['Input','Output'].forEach(k=>{const n=intNorm(r[k]);if(n) freq[n]=(freq[n]||0)+1;});});
+    const generic=new Set(Object.keys(freq).filter(k=>freq[k]>=GENERIC_MIN_COUNT));
+    return {freq,generic};
+}
+function isGenericVal(v,gi){ const n=intNorm(v); return n&&gi.generic.has(n); }
+function extractProcId(s){
+    const t=(s||'').trim(); if(!t) return '';
+    return /^\d/.test(t) ? t.split(' ')[0] : t;
+}
+const SDLC_STAGE_RANK={'Initiation & Discovery':0,'Design':1,'Build':2,'Test':3,'Deployment':4,'Post Development':5};
+function buildSdlcCatalog(rows){
+    const seen=new Map();
+    (rows||[]).forEach(r=>{
+        const id=extractProcId(r['Process']);
+        if(!id||seen.has(id)) return;
+        const stage=(r['Stage']||'').trim();
+        const isNum=/^\d/.test(id);
+        let numKey=Infinity;
+        if(isNum){ const m=id.match(/^(\d+)\.(\d+)([A-Za-z]*)/); if(m) numKey=parseFloat(m[1])*100+parseFloat(m[2])+(m[3]?m[3].charCodeAt(0)/1000:0); }
+        seen.set(id,{rank: SDLC_STAGE_RANK[stage] ?? 99, numKey});
+    });
+    const ordered=[...seen.entries()].sort((a,b)=>a[1].rank!==b[1].rank?a[1].rank-b[1].rank:a[1].numKey-b[1].numKey);
+    const index=new Map(); ordered.forEach(([id],i)=>index.set(id,i));
+    return {index, ordered: ordered.map(([id])=>id)};
+}
+function procIdsOf(processStr){
+    return (processStr||'').split(',').map(s=>extractProcId(s)).filter(Boolean);
+}
+function catalogStepDistance(catalog, procA, procB){
+    const idsA=procIdsOf(procA), idsB=procIdsOf(procB);
+    if(!idsA.length||!idsB.length) return null;
+    let best=null;
+    idsA.forEach(ia=>{ const pa=catalog.index.get(ia); if(pa===undefined) return;
+        idsB.forEach(ib=>{ const pb=catalog.index.get(ib); if(pb===undefined) return;
+            const d=Math.abs(pa-pb); if(best===null||d<best) best=d; }); });
+    return best;
+}
+function stepAdjacencyScore(catalog, procA, procB){
+    const d=catalogStepDistance(catalog, procA, procB);
+    if(d===null) return {score:0,distance:null};
+    if(d===1) return {score:100,distance:d};
+    if(d===0) return {score:50,distance:d};
+    if(d===2) return {score:60,distance:d};
+    if(d===3) return {score:30,distance:d};
+    return {score:0,distance:d};
+}
+function toolOverlapScore(a,b){ if(!a||!b) return 0; return intJaccard(a,b)*100; }
+function teamRoleScore(teamA,teamB){ return (teamA && teamA===teamB) ? 100 : 0; }
+function intTrunc(s,n=44){ s=(s||'').replace(/\s+/g,' ').trim(); return s.length>n?s.slice(0,n)+'…':s; }
+
+// Score the draft idea against ONE existing library row.
+function scoreDraftAgainst(draft, row, genericIdx, stopwords, catalog) {
+    const draftOut=draft['Output']||'', draftIn=draft['Input']||'';
+    const rowOut=row['Output']||'', rowIn=row['Input']||'';
+    const outIn=intTextSim(draftOut, rowIn, stopwords);   // draft -> row
+    const inOut=intTextSim(rowOut, draftIn, stopwords);   // row -> draft
+    const forward = outIn >= inOut;
+    const dirScore = Math.max(outIn, inOut);
+    const sOut = forward?draftOut:rowOut, sIn = forward?rowIn:draftIn;
+
+    const tbcFlag = intIsTBC(sOut) || intIsTBC(sIn);
+    const genericFlag = isGenericVal(sOut, genericIdx) || isGenericVal(sIn, genericIdx);
+    const stepAdj = stepAdjacencyScore(catalog, forward?draft['SDLC Process Mapping']:row['SDLC Process Mapping'], forward?row['SDLC Process Mapping']:draft['SDLC Process Mapping']);
+    const toolSc = toolOverlapScore(row['Tool'], '');   // draft has no Tool field in the form
+    const teamSc = teamRoleScore(draft['Team'], row['Team']);
+
+    let dataHandoffSc = dirScore;
+    if (genericFlag) {
+        const val = isGenericVal(sOut, genericIdx) ? intNorm(sOut) : intNorm(sIn);
+        const clusterSize = genericIdx.freq[val] || GENERIC_MIN_COUNT;
+        dataHandoffSc = dirScore / (1 + Math.log2(clusterSize));
+    }
+    const weighted = { dataHandoff: dataHandoffSc*0.50, stage: stepAdj.score*0.20, tool: toolSc*0.15, teamRole: teamSc*0.15 };
+    let confidence = Object.values(weighted).reduce((s,v)=>s+v,0);
+    if (tbcFlag) confidence = Math.min(confidence, 20);
+
+    const dominant = Object.entries(weighted).sort((x,y)=>y[1]-x[1])[0][0];
+    const type = dominant==='dataHandoff'?'Data Handoff':dominant==='tool'?'Shared Context/Tool':dominant==='stage'?'Trigger':'Shared Context/Tool';
+
+    const reasonParts=[];
+    if (dirScore>30) reasonParts.push(`Output "${intTrunc(sOut)}" ≈ Input "${intTrunc(sIn)}" (${dirScore.toFixed(0)}%)`);
+    if (stepAdj.distance!==null) reasonParts.push(`${stepAdj.distance} process-step${stepAdj.distance===1?'':'s'} apart`);
+    if (toolSc>0) reasonParts.push('shared tool');
+    if (teamSc>0) reasonParts.push('same team');
+
+    return { target: row['Agent Name'], direction: forward?'draft→existing':'existing→draft', type,
+        confidence: Math.round(Math.min(100,confidence)*10)/10, dataIncomplete: tbcFlag,
+        reason: reasonParts.join(' · ') || 'weak/no signal' };
+}
+
+function findConnectionSuggestions(draft) {
+    if (!library.length) return [];
+    const genericIdx = buildGenericIndex(library);
+    const stopwords = buildToolStopwords(library);
+    const catalog = buildSdlcCatalog(sdlcRows);
+    return library
+        .filter(r => intNorm(r['Agent Name']) !== intNorm(draft['Agent Name']))
+        .map(r => scoreDraftAgainst(draft, r, genericIdx, stopwords, catalog))
+        .filter(r => r.confidence >= CONN_THRESHOLD)
+        .sort((a,b) => b.confidence - a.confidence)
+        .slice(0, 5);
+}
+
 function runCheck() {
     const name=g('f-name').trim(), desc=g('f-desc').trim(), ability=g('f-ability'),
           bv=g('f-bv').trim(), inp=g('f-input').trim(), out=g('f-output').trim(),
@@ -472,10 +628,14 @@ function runCheck() {
     if (!name||!desc||!ability||!bv||!inp||!out||!team||!sdlc||!typeEl) {
         alert('⚠️ Please fill in all required fields (*)'); return;
     }
+    const procEl = document.getElementById('f-proc');
+    const procVal = procEl ? Array.from(procEl.selectedOptions).map(o=>o.value).join(',') : '';
     newAgent = { 'Agent Name':name,'Description':desc,'Core Ability':ability,
-        'Business Value':bv,'Input':inp,'Output':out,'Type':typeEl.value,'Team':team,'SDLC Stage':sdlc };
+        'Business Value':bv,'Input':inp,'Output':out,'Type':typeEl.value,'Team':team,'SDLC Stage':sdlc,
+        'SDLC Process Mapping':procVal };
     matches = library.map(row=>({score:sim(newAgent,row),agent:row}))
         .sort((a,b)=>b.score-a.score).slice(0,5);
+    connSuggestions = findConnectionSuggestions(newAgent);
     idx = 0;
     renderResult();
     gTab('result',document.getElementById('t-result-btn'));
@@ -584,6 +744,7 @@ function renderResult() {
                 <td>
                     <strong>${h(m.agent['Agent Name'])}</strong>
                     <span style="font-size:11px;color:var(--gray-400);display:block;margin-top:2px;">${m.agent['SDLC Stage']||''}${m.agent['SDLC Process Mapping']?' · '+m.agent['SDLC Process Mapping']:''}</span>
+                    ${m.agent['Matching Agent']?`<span style="font-size:11px;color:#6d28d9;display:block;margin-top:2px;">🔗 Matches: ${h(m.agent['Matching Agent'])}</span>`:''}
                 </td>
                 <td>
                     ${h(m.agent['Team']||'—')}
@@ -595,6 +756,23 @@ function renderResult() {
             </tr>`;
         }).join('')}</tbody>
     </table>
+
+    ${connSuggestions.length?`
+    <div class="sec-title" style="margin-top:18px">🔗 ต่อกับตัวนี้ได้ (Suggested Connections)</div>
+    <div style="font-size:11.5px;color:var(--gray-400);margin-bottom:8px">Agent/Skill ที่อาจส่งข้อมูลต่อ, trigger กัน, หรือใช้ context ร่วมกับไอเดียนี้ได้</div>
+    <div style="display:flex;flex-direction:column;gap:6px;margin-bottom:18px">
+    ${connSuggestions.map(c=>{
+        const typeColor={'Sub-component':'#6d28d9','Data Handoff':'#1558b0','Trigger':'#b45309','Shared Context/Tool':'#0b7a68'}[c.type]||'#7a85a3';
+        const confColor=c.confidence>=80?'#15803d':c.confidence>=55?'#1558b0':'#b45309';
+        return `<div style="display:flex;align-items:center;gap:10px;padding:9px 12px;background:#faf9fc;border:1px solid var(--gray-200);border-radius:8px">
+            <span style="font-size:12px;font-weight:700;color:${confColor};font-family:'IBM Plex Mono',monospace;min-width:42px">${c.confidence.toFixed(0)}%</span>
+            <span style="font-size:9.5px;font-weight:700;color:${typeColor};background:${typeColor}15;border:1px solid ${typeColor}40;padding:2px 7px;border-radius:4px;white-space:nowrap">${c.type}</span>
+            <span style="font-weight:600;flex:1">${c.direction==='draft→existing'?'(ไอเดียนี้) → ':''}${h(c.target)}${c.direction==='existing→draft'?' → (ไอเดียนี้)':''}</span>
+            ${c.dataIncomplete?'<span title="ข้อมูล Input/Output ไม่ครบ">⚠️</span>':''}
+            <span style="font-size:11px;color:var(--gray-400)">${c.reason}</span>
+        </div>`;
+    }).join('')}
+    </div>`:''}
 
     ${showReg?`<div class="reg-box">
         <p>✅ <strong>Similarity below 50%</strong> — This Agent/Skill is sufficiently unique and ready to register.</p>
@@ -677,6 +855,11 @@ function parseLine(line) {
 
 // ── Helpers ───────────────────────────────────────────
 function uniq(arr,key) { return [...new Set(arr.map(r=>r[key]).filter(Boolean))].sort(); }
+// 'SDLC Process Mapping' (and similar multi-select columns) can hold several
+// comma-separated values in one cell — split & flatten before deduping.
+function uniqMulti(arr,key) {
+    return [...new Set(arr.flatMap(r=>(r[key]||'').split(',').map(s=>s.trim()).filter(Boolean)))].sort();
+}
 function g(id) { return document.getElementById(id)?.value||''; }
 function h(t) { const d=document.createElement('div'); d.textContent=t; return d.innerHTML; }
 function show(id) { document.getElementById(id).style.display=''; }
