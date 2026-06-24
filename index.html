@@ -297,43 +297,42 @@
                         <div class="radio-row">
                             <label><input type="radio" name="ftype" value="Agent" checked> 🤖 Agent</label>
                             <label><input type="radio" name="ftype" value="Skill"> ⚡ Skill</label>
+                            <label><input type="radio" name="ftype" value="Agent+Skill"> 🤖⚡ Agent+Skill</label>
                         </div>
                     </div>
                     <div class="fg">
-                        <label>Team <span class="req">*</span></label>
-                        <select id="f-team"><option value="">-- Select Team --</option></select>
+                        <label>Core Ability <span class="req">*</span> <small style="color:var(--gray-400);font-weight:400;">(Ctrl+click for multiple)</small></label>
+                        <select id="f-ability" multiple size="4"></select>
                     </div>
                 </div>
                 <div class="grid2">
                     <div class="fg">
-                        <label>Core Ability <span class="req">*</span></label>
-                        <select id="f-ability"><option value="">-- Select Core Ability --</option></select>
+                        <label>Related role <span class="req">*</span> <small style="color:var(--gray-400);font-weight:400;">(Ctrl+click for multiple)</small></label>
+                        <select id="f-role" multiple size="4"></select>
                     </div>
                     <div class="fg">
-                        <label>Business Value <span class="req">*</span></label>
-                        <textarea id="f-bv" placeholder="Business value or benefit gained" rows="2"></textarea>
+                        <label>SDLC Phase <small style="color:var(--gray-400);font-weight:400;">(optional · Ctrl+click for multiple)</small></label>
+                        <select id="f-sdlc" multiple size="4" onchange="onSDLC()"></select>
                     </div>
                 </div>
                 <div class="grid2">
+                    <div class="fg" id="f-proc-grp">
+                        <label>SDLC Process <small style="color:var(--gray-400);font-weight:400;">(optional · Ctrl+click for multiple)</small></label>
+                        <select id="f-proc" multiple size="4"></select>
+                    </div>
                     <div class="fg">
                         <label>Input <span class="req">*</span></label>
                         <textarea id="f-input" placeholder="Input data or files this Agent/Skill receives" rows="2"></textarea>
                     </div>
+                </div>
+                <div class="grid2">
                     <div class="fg">
                         <label>Output <span class="req">*</span></label>
                         <textarea id="f-output" placeholder="Output or result produced" rows="2"></textarea>
                     </div>
-                </div>
-                <div class="grid2">
                     <div class="fg">
-                        <label>SDLC Phase <span class="req">*</span></label>
-                        <select id="f-sdlc" onchange="onSDLC()">
-                            <option value="">-- Select SDLC Phase --</option>
-                        </select>
-                    </div>
-                    <div class="fg" id="f-proc-grp" style="display:none;">
-                        <label>SDLC Process <span class="req">*</span> <small style="color:var(--gray-400);font-weight:400;">(Ctrl+click for multiple)</small></label>
-                        <select id="f-proc" multiple size="4"></select>
+                        <label>Business Value <span class="req">*</span></label>
+                        <textarea id="f-bv" placeholder="Business value or benefit gained" rows="2"></textarea>
                     </div>
                 </div>
                 <div class="btn-group">
@@ -342,6 +341,7 @@
                 </div>
             </div>
         </div>
+
 
         <!-- TAB: ANALYSIS -->
         <div id="tab-result" class="tab-content">
@@ -379,7 +379,7 @@ const REGISTER_URL = 'https://forms.office.com/Pages/ResponsePage.aspx?id=wGfYuE
 const WEIGHTS = { 'Agent Name':0.25,'Description':0.25,'Core Ability':0.15,'Input':0.15,'Output':0.15,'Business Value':0.05 };
 
 // ── State ────────────────────────────────────────────
-let library=[], newAgent={}, matches=[], idx=0, sdlcRows=[], connSuggestions=[];
+let library=[], newAgent={}, matches=[], idx=0, sdlcRows=[], connSuggestions=[], connections=[];
 
 // ── Bootstrap ────────────────────────────────────────
 window.onload = () => fetchFromScript();
@@ -399,6 +399,7 @@ function fetchFromScript() {
         clearTimeout(timer); script.remove(); delete window[cbName];
         library = data.data || [];
         sdlcRows = Array.isArray(data.sdlc) ? data.sdlc : [];
+        connections = Array.isArray(data.connections) ? data.connections : [];
         libConnCache = null;
         library.length ? onLoaded('Google Sheets') : (() => { hide('loadSpinner'); show('loadError'); document.getElementById('errMsg').textContent='No data returned from script.'; })();
     };
@@ -445,10 +446,11 @@ function onLoaded(source) {
 
 // ── Dropdowns ────────────────────────────────────────
 function populateDropdowns() {
-    fill('f-team',    uniq(library,'Team'),         '-- Select Team --');
-    fill('f-ability', uniq(library,'Core Ability'), '-- Select Core Ability --');
+    fillMulti('f-ability', uniq(library,'Core Ability'));
+    fillMulti('f-role', uniqMulti(library,'Related Role'));
     const sdlcPhases = ['non-SDLC', 'Initiation', 'Discovery', 'Design', 'Build', 'Test', 'Deployment', 'Across Phase'];
-    fill('f-sdlc', sdlcPhases, '-- Select SDLC Phase --');
+    fillMulti('f-sdlc', sdlcPhases);
+    onSDLC(); // pre-populate SDLC Process with the full list (no phase selected yet)
 }
 
 function fill(id, opts, ph) {
@@ -456,17 +458,19 @@ function fill(id, opts, ph) {
     s.innerHTML = `<option value="">${ph}</option>`;
     opts.forEach(o => { const e=document.createElement('option'); e.value=e.textContent=o; s.appendChild(e); });
 }
+function fillMulti(id, opts) {
+    const s = document.getElementById(id);
+    s.innerHTML = '';
+    opts.forEach(o => { const e=document.createElement('option'); e.value=e.textContent=o; s.appendChild(e); });
+}
 
 function onSDLC() {
-    const v = document.getElementById('f-sdlc').value;
-    const grp = document.getElementById('f-proc-grp');
+    const sels = Array.from(document.getElementById('f-sdlc').selectedOptions).map(o=>o.value).filter(v=>v && v!=='non-SDLC');
     const sel = document.getElementById('f-proc');
-    if (v && v !== 'non-SDLC') {
-        grp.style.display='flex'; grp.style.flexDirection='column';
-        const procs = uniqMulti(library.filter(r=>r['SDLC Stage']===v),'SDLC Process Mapping');
-        sel.innerHTML = '';
-        procs.forEach(p=>{ const o=document.createElement('option'); o.value=o.textContent=p; sel.appendChild(o); });
-    } else { grp.style.display='none'; }
+    const rows = sels.length ? library.filter(r=>sels.includes(r['SDLC Stage'])) : library;
+    const procs = uniqMulti(rows,'SDLC Process Mapping');
+    sel.innerHTML = '';
+    procs.forEach(p=>{ const o=document.createElement('option'); o.value=o.textContent=p; sel.appendChild(o); });
 }
 
 // ── Check ─────────────────────────────────────────────
@@ -570,6 +574,15 @@ function stepAdjacencyScore(catalog, procA, procB){
 }
 function toolOverlapScore(a,b){ if(!a||!b) return 0; return intJaccard(a,b)*100; }
 function teamRoleScore(teamA,teamB){ return (teamA && teamA===teamB) ? 100 : 0; }
+// Compares comma-separated role lists as whole names (BA/PO/QA survive — the
+// generic word-tokenizer would otherwise drop 2-3 letter acronyms).
+function roleSetOverlap(roleA, roleB) {
+    const setA = new Set((roleA||'').split(',').map(s=>s.trim().toLowerCase()).filter(Boolean));
+    const setB = new Set((roleB||'').split(',').map(s=>s.trim().toLowerCase()).filter(Boolean));
+    if (!setA.size || !setB.size) return 0;
+    let inter=0; setA.forEach(r=>{ if(setB.has(r)) inter++; });
+    return inter/(setA.size+setB.size-inter)*100;
+}
 function intTrunc(s,n=44){ s=(s||'').replace(/\s+/g,' ').trim(); return s.length>n?s.slice(0,n)+'…':s; }
 
 // Score the draft idea against ONE existing library row.
@@ -586,7 +599,7 @@ function scoreDraftAgainst(draft, row, genericIdx, stopwords, catalog) {
     const genericFlag = isGenericVal(sOut, genericIdx) || isGenericVal(sIn, genericIdx);
     const stepAdj = stepAdjacencyScore(catalog, forward?draft['SDLC Process Mapping']:row['SDLC Process Mapping'], forward?row['SDLC Process Mapping']:draft['SDLC Process Mapping']);
     const toolSc = toolOverlapScore(row['Tool'], '');   // draft has no Tool field in the form
-    const teamSc = teamRoleScore(draft['Team'], row['Team']);
+    const roleSc = roleSetOverlap(draft['Related Role'], row['Related Role']);
 
     let dataHandoffSc = dirScore;
     if (genericFlag) {
@@ -594,7 +607,7 @@ function scoreDraftAgainst(draft, row, genericIdx, stopwords, catalog) {
         const clusterSize = genericIdx.freq[val] || GENERIC_MIN_COUNT;
         dataHandoffSc = dirScore / (1 + Math.log2(clusterSize));
     }
-    const weighted = { dataHandoff: dataHandoffSc*0.50, stage: stepAdj.score*0.20, tool: toolSc*0.15, teamRole: teamSc*0.15 };
+    const weighted = { dataHandoff: dataHandoffSc*0.50, stage: stepAdj.score*0.20, tool: toolSc*0.15, teamRole: roleSc*0.15 };
     let confidence = Object.values(weighted).reduce((s,v)=>s+v,0);
     if (tbcFlag) confidence = Math.min(confidence, 20);
 
@@ -605,9 +618,9 @@ function scoreDraftAgainst(draft, row, genericIdx, stopwords, catalog) {
     if (dirScore>30) reasonParts.push(`Output "${intTrunc(sOut)}" ≈ Input "${intTrunc(sIn)}" (${dirScore.toFixed(0)}%)`);
     if (stepAdj.distance!==null) reasonParts.push(`${stepAdj.distance} process-step${stepAdj.distance===1?'':'s'} apart`);
     if (toolSc>0) reasonParts.push('shared tool');
-    if (teamSc>0) reasonParts.push('same team');
+    if (roleSc>0) reasonParts.push('overlapping role');
 
-    return { target: row['Agent Name'], direction: forward?'draft→existing':'existing→draft', type,
+    return { target: row['Agent Name'], owner: row['Owner']||'', direction: forward?'draft→existing':'existing→draft', type,
         confidence: Math.round(Math.min(100,confidence)*10)/10, dataIncomplete: tbcFlag,
         reason: reasonParts.join(' · ') || 'weak/no signal' };
 }
@@ -626,18 +639,17 @@ function findConnectionSuggestions(draft) {
 }
 
 function runCheck() {
-    const name=g('f-name').trim(), desc=g('f-desc').trim(), ability=g('f-ability'),
-          bv=g('f-bv').trim(), inp=g('f-input').trim(), out=g('f-output').trim(),
-          team=g('f-team'), sdlc=g('f-sdlc');
+    const name=g('f-name').trim(), desc=g('f-desc').trim(),
+          bv=g('f-bv').trim(), inp=g('f-input').trim(), out=g('f-output').trim();
+    const ability=gMulti('f-ability'), role=gMulti('f-role');
+    const sdlc=gMulti('f-sdlc'), procVal=gMulti('f-proc');
     const typeEl = document.querySelector('input[name="ftype"]:checked');
-    if (!name||!desc||!ability||!bv||!inp||!out||!team||!sdlc||!typeEl) {
+    if (!name||!desc||!ability||!bv||!inp||!out||!role||!typeEl) {
         alert('⚠️ Please fill in all required fields (*)'); return;
     }
-    const procEl = document.getElementById('f-proc');
-    const procVal = procEl ? Array.from(procEl.selectedOptions).map(o=>o.value).join(',') : '';
     newAgent = { 'Agent Name':name,'Description':desc,'Core Ability':ability,
-        'Business Value':bv,'Input':inp,'Output':out,'Type':typeEl.value,'Team':team,'SDLC Stage':sdlc,
-        'SDLC Process Mapping':procVal };
+        'Business Value':bv,'Input':inp,'Output':out,'Type':typeEl.value,'Related Role':role,
+        'SDLC Stage':sdlc,'SDLC Process Mapping':procVal };
     matches = library.map(row=>({score:sim(newAgent,row),agent:row}))
         .sort((a,b)=>b.score-a.score).slice(0,5);
     connSuggestions = findConnectionSuggestions(newAgent);
@@ -713,7 +725,7 @@ function renderResult() {
             <div class="info-grid">
                 <div class="info-item"><div class="il">Name</div><div class="iv">${h(newAgent['Agent Name'])}</div></div>
                 <div class="info-item"><div class="il">Type</div><div class="iv">${newAgent['Type']}</div></div>
-                <div class="info-item"><div class="il">Team</div><div class="iv">${newAgent['Team']}</div></div>
+                <div class="info-item"><div class="il">Related Role</div><div class="iv">${h(newAgent['Related Role']||'—')}</div></div>
                 <div class="info-item"><div class="il">Core Ability</div><div class="iv">${newAgent['Core Ability']}</div></div>
                 <div class="info-item"><div class="il">SDLC Phase</div><div class="iv">${newAgent['SDLC Stage']||'—'}</div></div>
             </div>
@@ -762,22 +774,22 @@ function renderResult() {
         }).join('')}</tbody>
     </table>
 
-    ${connSuggestions.length?`
     <div class="sec-title" style="margin-top:18px">🔗 ต่อกับตัวนี้ได้ (Suggested Connections)</div>
     <div style="font-size:11.5px;color:var(--gray-400);margin-bottom:8px">Agent/Skill ที่อาจส่งข้อมูลต่อ, trigger กัน, หรือใช้ context ร่วมกับไอเดียนี้ได้</div>
-    <div style="display:flex;flex-direction:column;gap:6px;margin-bottom:18px">
+    ${connSuggestions.length ? `<div style="display:flex;flex-direction:column;gap:6px;margin-bottom:18px">
     ${connSuggestions.map(c=>{
         const typeColor={'Sub-component':'#6d28d9','Data Handoff':'#1558b0','Trigger':'#b45309','Shared Context/Tool':'#0b7a68'}[c.type]||'#7a85a3';
         const confColor=c.confidence>=80?'#15803d':c.confidence>=55?'#1558b0':'#b45309';
-        return `<div style="display:flex;align-items:center;gap:10px;padding:9px 12px;background:#faf9fc;border:1px solid var(--gray-200);border-radius:8px">
+        return `<div style="display:flex;align-items:center;gap:10px;padding:9px 12px;background:#faf9fc;border:1px solid var(--gray-200);border-radius:8px;flex-wrap:wrap">
             <span style="font-size:12px;font-weight:700;color:${confColor};font-family:'IBM Plex Mono',monospace;min-width:42px">${c.confidence.toFixed(0)}%</span>
             <span style="font-size:9.5px;font-weight:700;color:${typeColor};background:${typeColor}15;border:1px solid ${typeColor}40;padding:2px 7px;border-radius:4px;white-space:nowrap">${c.type}</span>
-            <span style="font-weight:600;flex:1">${c.direction==='draft→existing'?'(ไอเดียนี้) → ':''}${h(c.target)}${c.direction==='existing→draft'?' → (ไอเดียนี้)':''}</span>
+            <span style="font-weight:600">${c.direction==='draft→existing'?'(ไอเดียนี้) → ':''}${h(c.target)}${c.direction==='existing→draft'?' → (ไอเดียนี้)':''}</span>
+            ${c.owner?`<span class="owner-tag">👤 ${h(c.owner)}</span>`:''}
             ${c.dataIncomplete?'<span title="ข้อมูล Input/Output ไม่ครบ">⚠️</span>':''}
-            <span style="font-size:11px;color:var(--gray-400)">${c.reason}</span>
+            <span style="font-size:11px;color:var(--gray-400);flex-basis:100%">${h(c.reason)}</span>
         </div>`;
     }).join('')}
-    </div>`:''}
+    </div>` : `<div style="padding:14px 16px;background:#f8f9fb;border:1px dashed var(--gray-200);border-radius:8px;color:var(--gray-400);font-size:12px;margin-bottom:18px">ไม่พบ Agent/Skill ใน library ที่น่าจะเชื่อมต่อกับไอเดียนี้ได้ (เกณฑ์ขั้นต่ำ ${CONN_THRESHOLD}% confidence) — อาจเป็นเพราะ Input/Output ของไอเดียนี้ยังไม่ใกล้เคียงกับตัวไหนเลย</div>`}
 
     ${showReg?`<div class="reg-box">
         <p>✅ <strong>Similarity below 50%</strong> — This Agent/Skill is sufficiently unique and ready to register.</p>
@@ -820,8 +832,25 @@ function closeModal() { document.getElementById('modal').classList.remove('show'
 // ── Similarity ────────────────────────────────────────
 function sim(a,b) {
     let t=0,w=0;
-    Object.entries(WEIGHTS).forEach(([f,wt])=>{ if(a[f]&&b[f]){t+=strSim(a[f],b[f])*wt; w+=wt;} });
+    Object.entries(WEIGHTS).forEach(([f,wt])=>{
+        if(a[f]&&b[f]){
+            const s = (f==='Core Ability') ? multiSelectSim(a[f],b[f]) : strSim(a[f],b[f]);
+            t+=s*wt; w+=wt;
+        }
+    });
     return w>0?t/w:0;
+}
+// Core Ability can now be multi-select on the draft side ("Documentation, Decision Making")
+// while library rows stay single-valued — compare as sets and take the best pairwise match
+// instead of treating the comma-joined string as one literal string (which would unfairly
+// penalize a correct match just because the draft also selected other abilities).
+function multiSelectSim(s1,s2) {
+    const list1=s1.split(',').map(x=>x.trim()).filter(Boolean);
+    const list2=s2.split(',').map(x=>x.trim()).filter(Boolean);
+    if(list1.length<=1 && list2.length<=1) return strSim(s1,s2);
+    let best=0;
+    list1.forEach(x=>list2.forEach(y=>{ const sc=strSim(x,y); if(sc>best) best=sc; }));
+    return best;
 }
 function strSim(s1,s2) {
     if(!s1||!s2) return 0;
@@ -866,6 +895,10 @@ function uniqMulti(arr,key) {
     return [...new Set(arr.flatMap(r=>(r[key]||'').split(',').map(s=>s.trim()).filter(Boolean)))].sort();
 }
 function g(id) { return document.getElementById(id)?.value||''; }
+function gMulti(id) {
+    const el = document.getElementById(id);
+    return el ? Array.from(el.selectedOptions).map(o=>o.value).join(',') : '';
+}
 function h(t) { const d=document.createElement('div'); d.textContent=t; return d.innerHTML; }
 function show(id) { document.getElementById(id).style.display=''; }
 function hide(id) { document.getElementById(id).style.display='none'; }
@@ -883,6 +916,73 @@ function gTab(name,btn) {
 // and renders the full Suggested Connections view in the Connections tab
 // ════════════════════════════════════════════════════════════════════
 let libConnCache = null;
+
+// Cheap, deterministic check used to skip the expensive scoring path entirely
+// for pairs already explicitly linked via the Matching Agent column.
+function checkSubComponent(a, b) {
+    const aMatches = (a['Matching Agent']||'').split(',').map(s=>s.trim()).filter(Boolean);
+    const bMatches = (b['Matching Agent']||'').split(',').map(s=>s.trim()).filter(Boolean);
+    const aMatchesB = aMatches.some(m => intNorm(m) === intNorm(b['Agent Name']));
+    const bMatchesA = bMatches.some(m => intNorm(m) === intNorm(a['Agent Name']));
+    if (!aMatchesB && !bMatchesA) return null;
+    const child = aMatchesB ? a : b, parent = aMatchesB ? b : a;
+    return { source: parent['Agent Name'], target: child['Agent Name'], type: 'Sub-component',
+        confidence: 100, dataIncomplete: false, genericTouch: false, genericValue: null,
+        reason: `"${child['Agent Name']}" → Matching Agent of "${parent['Agent Name']}"` };
+}
+
+// Find a previously stored connection for this pair (direction-agnostic) so
+// we never recompute or duplicate-write something already in the sheet.
+function findExistingConnection(conns, source, target) {
+    const a = intNorm(source), b = intNorm(target);
+    return (conns||[]).find(c => {
+        const cs = intNorm(c['Source Agent']), ct = intNorm(c['Target Agent']);
+        return (cs===a && ct===b) || (cs===b && ct===a);
+    }) || null;
+}
+
+// JSONP write helper — same script-tag technique used for reads, generalized
+// to pass arbitrary action/params and read back the JSON response.
+function callApi(params, onDone) {
+    const cbName = 'apiCb_' + Date.now() + '_' + Math.floor(Math.random()*1e6);
+    const old = document.getElementById('apiJsonp'); if (old) old.remove();
+    const qs = Object.entries(params).map(([k,v]) => encodeURIComponent(k)+'='+encodeURIComponent(v)).join('&');
+    const timer = setTimeout(() => { delete window[cbName]; onDone({ok:false, error:'timeout'}); }, 15000);
+    window[cbName] = (res) => { clearTimeout(timer); delete window[cbName]; onDone(res); };
+    const script = document.createElement('script');
+    script.id = 'apiJsonp';
+    script.src = SCRIPT_URL + '?callback=' + cbName + '&' + qs;
+    script.onerror = () => { clearTimeout(timer); delete window[cbName]; onDone({ok:false, error:'script load failed'}); };
+    document.head.appendChild(script);
+}
+
+// Persist newly-discovered suggestions to the Connections sheet, in small
+// sequential batches (keeps each GET URL short and avoids concurrent writes
+// racing on the same "next ID" counter). Runs quietly in the background —
+// the table the user sees is already rendered from the in-memory results.
+function persistNewConnections(list) {
+    const BATCH_SIZE = 8;
+    const batches = [];
+    for (let i = 0; i < list.length; i += BATCH_SIZE) batches.push(list.slice(i, i+BATCH_SIZE));
+    let bi = 0;
+    function next() {
+        if (bi >= batches.length) return;
+        const batch = batches[bi++];
+        const payload = batch.map(r => ({
+            'Source Agent': r.source, 'Target Agent': r.target, 'Direction': r.source+'→'+r.target,
+            'Connection Type': r.type, 'Status': 'suggested', 'Confidence': r.confidence, 'Reason': r.reason,
+        }));
+        callApi({ action: 'addConnections', connections: JSON.stringify(payload) }, res => {
+            if (res && res.ok) {
+                payload.forEach(p => connections.push(p)); // keep local cache consistent
+            } else {
+                console.warn('[connections] batch save failed:', res && res.error);
+            }
+            next();
+        });
+    }
+    next();
+}
 
 function scoreLibraryPair(a, b, genericIdx, stopwords, catalog) {
     // Sub-component override (Matching Agent links them)
@@ -939,16 +1039,45 @@ function computeLibraryConnections() {
     const stopwords = buildToolStopwords(library);
     const catalog = buildSdlcCatalog(sdlcRows);
     const CLUSTER_COLLAPSE_BELOW = 55;
-    const results = [];
+    const results = [], newlyFound = [];
     for (let i = 0; i < library.length; i++) {
         for (let j = i + 1; j < library.length; j++) {
-            const r = scoreLibraryPair(library[i], library[j], genericIdx, stopwords, catalog);
-            if (r.confidence >= CONN_THRESHOLD) results.push(r);
+            const a = library[i], b = library[j];
+
+            // 1) Sub-component is a deterministic fact from Matching Agent —
+            //    cheap to check, never needs storing/recomputing.
+            const sub = checkSubComponent(a, b);
+            if (sub) { results.push(sub); continue; }
+
+            // 2) Already decided/known in the Connections sheet? Reuse it —
+            //    this is the whole point: skip the expensive text-similarity
+            //    scoring entirely for any pair we've already seen before.
+            const existing = findExistingConnection(connections, a['Agent Name'], b['Agent Name']);
+            if (existing) {
+                if (existing['Status'] === 'rejected') continue; // hidden forever
+                results.push({
+                    source: existing['Source Agent'], target: existing['Target Agent'],
+                    type: existing['Connection Type'] || 'Data Handoff',
+                    confidence: existing['Status'] === 'confirmed' ? 100 : (parseFloat(existing['Confidence']) || 0),
+                    dataIncomplete: false, genericTouch: false, genericValue: null,
+                    confirmed: existing['Status'] === 'confirmed',
+                    reason: existing['Reason'] || '(stored)',
+                });
+                continue;
+            }
+
+            // 3) Genuinely new pair — compute it, and if it clears the bar,
+            //    queue it to be written to the Connections sheet so next
+            //    time this whole branch is skipped via step 2 above.
+            const r = scoreLibraryPair(a, b, genericIdx, stopwords, catalog);
+            if (r.confidence >= CONN_THRESHOLD) { results.push(r); newlyFound.push(r); }
         }
     }
+    if (newlyFound.length) persistNewConnections(newlyFound);
+
     const subComponents = results.filter(r => r.type === 'Sub-component');
-    const clusterCandidates = results.filter(r => r.type !== 'Sub-component' && r.genericTouch && r.confidence < CLUSTER_COLLAPSE_BELOW);
-    const uniquePairs = results.filter(r => r.type !== 'Sub-component' && !(r.genericTouch && r.confidence < CLUSTER_COLLAPSE_BELOW));
+    const clusterCandidates = results.filter(r => r.type !== 'Sub-component' && !r.confirmed && r.genericTouch && r.confidence < CLUSTER_COLLAPSE_BELOW);
+    const uniquePairs = results.filter(r => r.type !== 'Sub-component' && !(!r.confirmed && r.genericTouch && r.confidence < CLUSTER_COLLAPSE_BELOW));
     const clusters = {};
     clusterCandidates.forEach(r => {
         const key = intTrunc(r.genericValue || 'generic', 60);
@@ -1009,7 +1138,7 @@ function renderLibraryConnections() {
             <th>Source → Target</th><th>Reason</th>
         </tr></thead>
         <tbody>${S.uniquePairs.map(r => {
-            const flags = r.dataIncomplete ? '<span title="Input/Output ไม่ครบ">⚠️</span>' : '';
+            const flags = (r.dataIncomplete ? '<span title="Input/Output ไม่ครบ">⚠️</span>' : '') + (r.confirmed ? ' <span title="ยืนยันแล้ว" style="color:#15803d">✓</span>' : '');
             return `<tr>
                 <td>${bar(r.confidence)}</td>
                 <td>${badge(r.type)}</td>
@@ -1023,8 +1152,11 @@ function renderLibraryConnections() {
 
 function clearForm() {
     ['f-name','f-desc','f-bv','f-input','f-output'].forEach(id=>document.getElementById(id).value='');
-    ['f-team','f-ability','f-sdlc'].forEach(id=>document.getElementById(id).value='');
-    document.getElementById('f-proc-grp').style.display='none';
+    ['f-ability','f-role','f-sdlc','f-proc'].forEach(id=>{
+        const el=document.getElementById(id);
+        if(el) Array.from(el.options).forEach(o=>o.selected=false);
+    });
+    onSDLC(); // repopulate the full Process list since no phase is selected anymore
     document.querySelectorAll('input[name="ftype"]')[0].checked=true;
 }
 </script>
