@@ -235,6 +235,7 @@
             <button class="tab-btn active"  id="t-load-btn"   onclick="gTab('load',this)">📡 Library</button>
             <button class="tab-btn locked"  id="t-form-btn"   onclick="gTab('form',this)">📝 New Entry</button>
             <button class="tab-btn locked"  id="t-result-btn" onclick="gTab('result',this)">📊 Analysis</button>
+            <button class="tab-btn locked"  id="t-conn-btn"   onclick="gTab('conn',this)">🔗 Connections</button>
         </div>
 
         <!-- TAB: LIBRARY -->
@@ -346,6 +347,9 @@
         <div id="tab-result" class="tab-content">
             <div id="resultContent"></div>
         </div>
+        <div id="tab-conn" class="tab-content">
+            <div id="connContent" style="padding:10px 0"></div>
+        </div>
     </div>
 </div>
 
@@ -395,6 +399,7 @@ function fetchFromScript() {
         clearTimeout(timer); script.remove(); delete window[cbName];
         library = data.data || [];
         sdlcRows = Array.isArray(data.sdlc) ? data.sdlc : [];
+        libConnCache = null;
         library.length ? onLoaded('Google Sheets') : (() => { hide('loadSpinner'); show('loadError'); document.getElementById('errMsg').textContent='No data returned from script.'; })();
     };
     script.src = `${SCRIPT_URL}?callback=${cbName}`;
@@ -431,7 +436,7 @@ function onLoaded(source) {
         <div class="lib-card"><div class="num">${abilities.length}</div><div class="lbl">Core Abilities</div></div>
         <div class="lib-card"><div class="num">${stages.length}</div><div class="lbl">SDLC Stages</div></div>`;
     document.getElementById('loadTime').textContent = `${source} · ${new Date().toLocaleString('en-GB')}`;
-    unlock('t-form-btn'); unlock('t-result-btn');
+    unlock('t-form-btn'); unlock('t-result-btn'); unlock('t-conn-btn');
     populateDropdowns();
     document.getElementById('fStatusText').textContent = `Library ready — ${library.length} entries loaded from ${source}`;
     document.getElementById('fStatusBar').className = 'msg success';
@@ -871,7 +876,151 @@ function gTab(name,btn) {
     document.querySelectorAll('.tab-btn').forEach(el=>el.classList.remove('active'));
     document.getElementById('tab-'+name).classList.add('active');
     btn.classList.add('active');
+    if(name==='conn') renderLibraryConnections();
 }
+// ════════════════════════════════════════════════════════════════════
+// LIBRARY-WIDE CONNECTIONS — scores every pair in the loaded library
+// and renders the full Suggested Connections view in the Connections tab
+// ════════════════════════════════════════════════════════════════════
+let libConnCache = null;
+
+function scoreLibraryPair(a, b, genericIdx, stopwords, catalog) {
+    // Sub-component override (Matching Agent links them)
+    const aMatches = (a['Matching Agent']||'').split(',').map(s=>s.trim()).filter(Boolean);
+    const bMatches = (b['Matching Agent']||'').split(',').map(s=>s.trim()).filter(Boolean);
+    const aMatchesB = aMatches.some(m => intNorm(m) === intNorm(b['Agent Name']));
+    const bMatchesA = bMatches.some(m => intNorm(m) === intNorm(a['Agent Name']));
+    if (aMatchesB || bMatchesA) {
+        const child = aMatchesB ? a : b, parent = aMatchesB ? b : a;
+        return { source: parent['Agent Name'], target: child['Agent Name'], type: 'Sub-component',
+            confidence: 100, dataIncomplete: false, genericTouch: false, genericValue: null,
+            reason: `"${child['Agent Name']}" → Matching Agent of "${parent['Agent Name']}"` };
+    }
+
+    const outIn = intTextSim(a['Output'], b['Input'], stopwords);
+    const inOut = intTextSim(b['Output'], a['Input'], stopwords);
+    const forward = outIn >= inOut;
+    const dirScore = Math.max(outIn, inOut);
+    const sA = forward ? a : b, sB = forward ? b : a;
+
+    const tbcFlag = intIsTBC(sA['Output']) || intIsTBC(sB['Input']);
+    const genericFlag = isGenericVal(sA['Output'], genericIdx) || isGenericVal(sB['Input'], genericIdx);
+    const stepAdj = stepAdjacencyScore(catalog, sA['SDLC Process Mapping'], sB['SDLC Process Mapping']);
+    const toolSc = toolOverlapScore(sA['Tool'], sB['Tool']);
+    const teamSc = teamRoleScore(sA['Team'], sB['Team']);
+
+    let dataHandoffSc = dirScore;
+    if (genericFlag) {
+        const val = isGenericVal(sA['Output'], genericIdx) ? intNorm(sA['Output']) : intNorm(sB['Input']);
+        const clusterSize = genericIdx.freq[val] || GENERIC_MIN_COUNT;
+        dataHandoffSc = dirScore / (1 + Math.log2(clusterSize));
+    }
+    const weighted = { dataHandoff: dataHandoffSc * 0.50, stage: stepAdj.score * 0.20, tool: toolSc * 0.15, teamRole: teamSc * 0.15 };
+    let confidence = Object.values(weighted).reduce((s, v) => s + v, 0);
+    if (tbcFlag) confidence = Math.min(confidence, 20);
+
+    const dominant = Object.entries(weighted).sort((x, y) => y[1] - x[1])[0][0];
+    const type = dominant === 'dataHandoff' ? 'Data Handoff' : dominant === 'tool' ? 'Shared Context/Tool' : dominant === 'stage' ? 'Trigger' : 'Shared Context/Tool';
+    const reasonParts = [];
+    if (dirScore > 30) reasonParts.push(`Output "${intTrunc(sA['Output'])}" ≈ Input "${intTrunc(sB['Input'])}" (${dirScore.toFixed(0)}%)`);
+    if (stepAdj.distance !== null) reasonParts.push(`${stepAdj.distance} process-step${stepAdj.distance === 1 ? '' : 's'} apart`);
+    if (toolSc > 0) reasonParts.push('shared tool');
+    if (teamSc > 0) reasonParts.push('same team');
+
+    return { source: sA['Agent Name'], target: sB['Agent Name'], type,
+        confidence: Math.round(Math.min(100, confidence) * 10) / 10,
+        dataIncomplete: tbcFlag, genericTouch: genericFlag,
+        genericValue: genericFlag ? (isGenericVal(sA['Output'], genericIdx) ? sA['Output'] : sB['Input']) : null,
+        reason: reasonParts.join(' · ') || 'weak/no signal' };
+}
+
+function computeLibraryConnections() {
+    const genericIdx = buildGenericIndex(library);
+    const stopwords = buildToolStopwords(library);
+    const catalog = buildSdlcCatalog(sdlcRows);
+    const CLUSTER_COLLAPSE_BELOW = 55;
+    const results = [];
+    for (let i = 0; i < library.length; i++) {
+        for (let j = i + 1; j < library.length; j++) {
+            const r = scoreLibraryPair(library[i], library[j], genericIdx, stopwords, catalog);
+            if (r.confidence >= CONN_THRESHOLD) results.push(r);
+        }
+    }
+    const subComponents = results.filter(r => r.type === 'Sub-component');
+    const clusterCandidates = results.filter(r => r.type !== 'Sub-component' && r.genericTouch && r.confidence < CLUSTER_COLLAPSE_BELOW);
+    const uniquePairs = results.filter(r => r.type !== 'Sub-component' && !(r.genericTouch && r.confidence < CLUSTER_COLLAPSE_BELOW));
+    const clusters = {};
+    clusterCandidates.forEach(r => {
+        const key = intTrunc(r.genericValue || 'generic', 60);
+        (clusters[key] = clusters[key] || []).push(r);
+    });
+    return { subComponents, uniquePairs: uniquePairs.sort((a, b) => b.confidence - a.confidence), clusters };
+}
+
+function renderLibraryConnections() {
+    const el = document.getElementById('connContent');
+    if (!library.length) { el.innerHTML = '<p style="text-align:center;color:var(--gray-400);padding:40px">รอข้อมูลจาก Library…</p>'; return; }
+    if (!libConnCache) libConnCache = computeLibraryConnections();
+    const S = libConnCache;
+    const avgConf = S.uniquePairs.length ? (S.uniquePairs.reduce((s, r) => s + r.confidence, 0) / S.uniquePairs.length) : 0;
+
+    const TCOLOR = { 'Sub-component': '#6d28d9', 'Data Handoff': '#1558b0', 'Trigger': '#b45309', 'Shared Context/Tool': '#0b7a68' };
+    function badge(t) { const c = TCOLOR[t] || '#7a85a3'; return `<span style="font-size:9.5px;font-weight:700;color:${c};background:${c}15;border:1px solid ${c}40;padding:2px 7px;border-radius:4px;white-space:nowrap">${t}</span>`; }
+    function bar(pct) { const c = pct >= 80 ? '#15803d' : pct >= 55 ? '#1558b0' : '#b45309'; return `<div style="display:flex;align-items:center;gap:5px;min-width:80px"><div style="flex:1;height:5px;background:#f0f0f0;border-radius:3px;overflow:hidden"><div style="height:100%;width:${pct}%;background:${c}"></div></div><span style="font-size:11px;font-weight:700;color:${c};font-family:'IBM Plex Mono',monospace">${pct.toFixed(1)}%</span></div>`; }
+
+    el.innerHTML = `
+    <div style="margin-bottom:14px">
+        <div style="font-size:16px;font-weight:700;color:var(--navy)">🔗 Library Connection Analysis</div>
+        <div style="font-size:12px;color:var(--gray-400);margin-top:2px">Agents/Skills ที่อาจ integrate กันได้ — วิเคราะห์จาก Input/Output, SDLC proximity, Tool overlap, Team</div>
+    </div>
+    <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:16px">
+        <div class="lib-card"><div class="num" style="color:#6d28d9">${S.subComponents.length}</div><div class="lbl">Sub-components</div></div>
+        <div class="lib-card"><div class="num" style="color:#1558b0">${S.uniquePairs.length}</div><div class="lbl">Suggested Pairs</div></div>
+        <div class="lib-card"><div class="num" style="color:#0b7a68">${Object.keys(S.clusters).length}</div><div class="lbl">Generic Clusters</div></div>
+        <div class="lib-card"><div class="num" style="color:#b45309">${avgConf.toFixed(0)}%</div><div class="lbl">Avg Confidence</div></div>
+    </div>
+
+    ${S.subComponents.length ? `<details style="margin-bottom:12px;background:#faf9fc;border:1px solid var(--gray-200);border-radius:10px;overflow:hidden">
+        <summary style="cursor:pointer;padding:12px 16px;font-size:13px;font-weight:600;color:var(--navy)">🧩 Sub-component links (${S.subComponents.length}) — explicit via Matching Agent</summary>
+        <div style="padding:4px 16px 14px;display:flex;flex-direction:column;gap:4px">
+            ${S.subComponents.map(r => `<div style="font-size:12px;padding:6px 10px;background:#fff;border:1px solid var(--gray-200);border-radius:6px"><strong>${h(r.source)}</strong> <span style="color:var(--gray-400)">⊃</span> ${h(r.target)}</div>`).join('')}
+        </div>
+    </details>` : ''}
+
+    ${Object.keys(S.clusters).length ? `<details style="margin-bottom:12px;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:10px;overflow:hidden">
+        <summary style="cursor:pointer;padding:12px 16px;font-size:13px;font-weight:600;color:#15803d">🗂 Generic clusters (${Object.keys(S.clusters).length}) — common values shared by many agents, dampened</summary>
+        <div style="padding:4px 16px 14px;display:flex;flex-direction:column;gap:4px">
+            ${Object.entries(S.clusters).map(([val, members]) => {
+                const sources = [...new Set(members.map(m => m.source))], targets = [...new Set(members.map(m => m.target))];
+                const avg = members.reduce((s, m) => s + m.confidence, 0) / members.length;
+                return `<div style="font-size:12px;padding:6px 10px;background:#fff;border:1px solid #bbf7d0;border-radius:6px;display:flex;justify-content:space-between;align-items:center">
+                    <span><strong>"${h(val)}"</strong> <span style="color:var(--gray-400)">— ${sources.length} sources × ${targets.length} targets</span></span>
+                    <span style="color:var(--gray-400);font-family:'IBM Plex Mono',monospace;font-size:11px">avg ${avg.toFixed(0)}%</span>
+                </div>`;
+            }).join('')}
+        </div>
+    </details>` : ''}
+
+    <div style="font-size:14px;font-weight:600;color:var(--navy);margin-bottom:8px">Suggested Connections — sorted by confidence</div>
+    ${S.uniquePairs.length ? `<div style="overflow-x:auto">
+    <table class="rtable" style="font-size:12px">
+        <thead><tr>
+            <th style="width:100px">Confidence</th><th style="width:120px">Type</th>
+            <th>Source → Target</th><th>Reason</th>
+        </tr></thead>
+        <tbody>${S.uniquePairs.map(r => {
+            const flags = r.dataIncomplete ? '<span title="Input/Output ไม่ครบ">⚠️</span>' : '';
+            return `<tr>
+                <td>${bar(r.confidence)}</td>
+                <td>${badge(r.type)}</td>
+                <td style="font-weight:600">${h(r.source)} <span style="color:var(--gray-400);font-weight:400">→</span> ${h(r.target)} ${flags}</td>
+                <td style="font-size:11px;color:var(--gray-500)">${h(r.reason)}</td>
+            </tr>`;
+        }).join('')}</tbody>
+    </table></div>` : '<p style="text-align:center;color:var(--gray-400);padding:30px">ไม่พบ connection ที่ผ่านเกณฑ์ ≥ ${CONN_THRESHOLD}%</p>'}
+    `;
+}
+
 function clearForm() {
     ['f-name','f-desc','f-bv','f-input','f-output'].forEach(id=>document.getElementById(id).value='');
     ['f-team','f-ability','f-sdlc'].forEach(id=>document.getElementById(id).value='');
